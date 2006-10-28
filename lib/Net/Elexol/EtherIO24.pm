@@ -29,11 +29,11 @@ Net::Elexol::EtherIO24 - Object interface for manipulating Elexol Ether I/O 24 u
 
 =cut
 
-our $VERSION = '0.01';
+our $VERSION = '0.10';
 
 =head1 VERSION
 
-Version 0.01;
+Version 0.10;
 
 Requires Perl 5.8.0.
 
@@ -263,6 +263,7 @@ sub _service_loop {
 
 	my $status_time = time() + $self->{'service_status_fetch'};
 
+
 	while($self->{'data'}->{'running'}) {
 		if($self->{'service_status_fetch'} && $status_time < time()) {
 			# 0=don't recv_result, which would cause a deadlock
@@ -376,6 +377,10 @@ my $cmd_map = {
 	'\'R' => 'R',
 };
 
+my $cmd_rev_map = {};
+foreach my $key (keys %$cmd_map) {
+	$cmd_rev_map->{$cmd_map->{$key}} = $key;
+}
 
 my $send_commands = {
 	'IO24' => {
@@ -789,12 +794,9 @@ sub status_fetch {
 		print STDERR "WARNING: Unable to send status request.\n";
 		return 0;
 	} else {
-		if($recv) {
-			my $result = recv_result($self, $cmd);
-			if(!defined($result) ) {
-				print STDERR "WARNING: Error receiving status reply ($_error)\n" if($_debug);
-				return 0;
-			}
+		if($recv && !recv_result($self, $cmd)) {
+			print STDERR "WARNING: Error receiving status reply ($_error)\n" if($_debug);
+			return 0;
 		}
 	}
 	$self->{'data'}->{'last_status_fetch'} = time();
@@ -897,17 +899,19 @@ sub verify_send_command {
 			# found it!
 			my $len = length($c);
 			my $chk = substr($cmd, $start, $send_commands->{$c}->{'length'});
-			if(1||$_debug>1) {
+			if($_debug>1) {
 				my $type = $send_commands->{$c}->{'type'} || 0;
 				my $txt = _decode_cmd($chk, $len, $type);
 				print "verify_send_command: cmd \"$c\" -> \"".
 					$send_commands->{$c}->{'desc'}."\"".
-					($txt ne ''?": $txt":"")."\n" if($_debug>1);
+					($txt ne ''?": $txt":"")."\n";
 			}
-			if($set_map->{$c} && $self->{'threaded'}) {
+			#if($set_map->{$c} && $self->{'threaded'}) {
+			if($cmd_map->{$c} && $self->{'threaded'}) {
 				# block waiting for any outstanding status queries to return
 				# to avoid a race condition
-				my $f = 'rcvd '.$c;
+				#my $f = 'rcvd '.$c;
+				my $f = 'rcvd '.$cmd_map->{$c};
 				my $timeout = time() + $self->{'recv_timeout'};
 				lock($data->{$f});
 				while(!$data->{$f}) {
@@ -969,12 +973,12 @@ sub verify_recv_command {
 		# found it!
 		my $len = length($c);
 		my $chk = substr($cmd, 0, $recv_commands->{$c}->{'length'});
-		if($_debug>1) {
+		if(1||$_debug>1) {
 			my $type = $recv_commands->{$c}->{'type'} || 0;
 			my $txt = _decode_cmd($chk, $len, $type);
 			print "verify_recv_command: cmd \"$c\" -> \"".
 				$recv_commands->{$c}->{'desc'}."\"".
-				($txt ne ''?": $txt":"")."\n";
+				($txt ne ''?": $txt":"")."\n" if($_debug>1);
 		}
 		# flag received status
 		if($c ne 'R') { # only if not an eeprom
@@ -1139,7 +1143,8 @@ sub send_pkt {
 	my $pkt = shift;
 
 	my $socket = $self->{'socket'};
-	if($socket->send($pkt)<=0) {
+	my $ret =$socket->send($pkt);
+	if(!defined($ret) || $ret<=0) {
 		print "send_pkt: Unable to send packet: $!\n";
 		return 0;
 	}
