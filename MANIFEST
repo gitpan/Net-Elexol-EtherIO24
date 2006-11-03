@@ -1,5 +1,9 @@
 .cvsignore
 Changes
+examples/eeprom_test.pl
+examples/irig.pl
+examples/irig2.pl
+examples/README
 lib/Net/Elexol/EtherIO24.pm
 Makefile.PL
 MANIFEST

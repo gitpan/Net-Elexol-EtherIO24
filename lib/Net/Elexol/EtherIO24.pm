@@ -29,11 +29,11 @@ Net::Elexol::EtherIO24 - Object interface for manipulating Elexol Ether I/O 24 u
 
 =cut
 
-our $VERSION = '0.10';
+our $VERSION = '0.11';
 
 =head1 VERSION
 
-Version 0.10;
+Version 0.11.
 
 Requires Perl 5.8.0.
 
@@ -66,11 +66,13 @@ The control protocol is relatively simplistic and UDP based. This Perl
 module attempts to abstract this protocol and add other features
 along the way.
 
-It is thread savvy and will use threads if told to. It should perform
-adequately without threads, but various functionality is reduced as
+It is thread savvy and will use threads if told to. It might perform
+adequately without threads, but various functionality would be reduced as
 a result. In particular, the module functions in a nice asynchronous
-way when it can use threads. Threads supoprt requires Perl 5.8, and
-this module may not function correctly, or even compile, with an older Perl.
+way when it can use threads. Threads supoprt requires Perl 5.8.
+This module may not function correctly, or even compile, with an older Perl.
+Your Perl will require Threads to be enabled at compile-time, even if you
+don't use Threads.
 
 It uses C<IO::Socket::INET> for network I/O. It was developed using Perl
 on a BSD system, but has been shown to function using Perl with Cygwin and
@@ -906,27 +908,28 @@ sub verify_send_command {
 					$send_commands->{$c}->{'desc'}."\"".
 					($txt ne ''?": $txt":"")."\n";
 			}
-			#if($set_map->{$c} && $self->{'threaded'}) {
-			if($cmd_map->{$c} && $self->{'threaded'}) {
-				# block waiting for any outstanding status queries to return
-				# to avoid a race condition
-				#my $f = 'rcvd '.$c;
-				my $f = 'rcvd '.$cmd_map->{$c};
-				my $timeout = time() + $self->{'recv_timeout'};
-				lock($data->{$f});
-				while(!$data->{$f}) {
-					print "verify_send_command: flag snd check data->{$f} = ".$data->{$f}."\n" if($_debug>2);
-					last if(!cond_timedwait($data->{$f}, $timeout));
-				}
-				print "verify_send_command: flag snd result data->{$f} = ".$data->{$f}."\n" if($_debug>2);
-				if(!$data->{$f}) {
-					$_error = 'Timeout waiting for outstanding status reply '.
-						'while trying to send new status';
-					$ok = 0;
-					last;
-				}
-
-			}
+# Hmm, what was this block of code for? It seems to slow things down and occasionaly hang the whole thing!
+#			#if($set_map->{$c} && $self->{'threaded'}) {
+#			if($cmd_map->{$c} && $self->{'threaded'}) {
+#				# block waiting for any outstanding status queries to return
+#				# to avoid a race condition
+#				#my $f = 'rcvd '.$c;
+#				my $f = 'rcvd '.$cmd_map->{$c};
+#				my $timeout = time() + $self->{'recv_timeout'};
+#				lock($data->{$f});
+#				while(!$data->{$f}) {
+#					print "verify_send_command: flag snd check data->{$f} = ".$data->{$f}."\n" if($_debug>2);
+#					last if(!cond_timedwait($data->{$f}, $timeout));
+#				}
+#				print "verify_send_command: flag snd result data->{$f} = ".$data->{$f}."\n" if($_debug>2);
+#				if(!$data->{$f}) {
+#					$_error = 'Timeout waiting for outstanding status reply '.
+#						'while trying to send new status';
+#					$ok = 0;
+#					last;
+#				}
+#
+#			}
 			if($cmd_map->{$c}) { # reset "received" status for query commands
 				my $f = 'rcvd '.$cmd_map->{$c};
 				if($cmd_map->{$c} eq 'R') { # save eeprom data

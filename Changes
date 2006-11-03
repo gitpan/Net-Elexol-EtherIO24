@@ -1,9 +1,13 @@
 Revision history for Net-Elexol-EtherIO24
 
-0.01	2005-10-03
+0.01	2005-10-03 [chrisy]
 	First version, just for fun.
 
-0.10	2006-10-28
+0.10	2006-10-28 [chrisy]
 	- Various small tweaks
 	- Fixed a timing bug that only presented itself when _not_ debugging!
+
+0.11	2006-11-03 [chrisy]
+	- Same timing bug. Disabled a section of code that seems to be the root cause.
+	- Added clarification to documentation about the need for threads and threading support.
 

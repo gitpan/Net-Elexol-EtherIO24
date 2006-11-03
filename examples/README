@@ -1,0 +1,8 @@
+examples
+--------
+
+This directory contains some (mostly *very* crude) examples of how the 
+Net::Elexol::EtherIO24 module can be used.
+
+YMMV.
+
