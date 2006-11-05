@@ -8,8 +8,8 @@ my $debug = 0;
 
 my $ro = 1;
 
-my $addrw = "192.168.1.83";  # i/o module with relays attached
-my $addrr = "192.168.1.83";  # i/o module with rain sensor
+my $addrw = "192.168.100.83";  # i/o module with relays attached
+my $addrr = "192.168.100.83";  # i/o module with rain sensor
 my $rain_sensor_line = 0;      # line on module for rain sensor
 
 
@@ -32,9 +32,11 @@ if(!$eior) {
 } else {
 	# Check rain sensor
 
+	my $prev = 2;
 	while(1) {
 		$rain_sensor = $eior->get_line_live($rain_sensor_line);
-		print "RAIN: $rain_sensor\n";
+		print "RAIN: $rain_sensor\n" if($rain_sensor != $prev);
+		$prev = $rain_sensor;
 	}
 
 	$rain_sensor = $eior->get_line($rain_sensor_line);

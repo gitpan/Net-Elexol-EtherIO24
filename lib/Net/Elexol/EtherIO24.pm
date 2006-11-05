@@ -29,11 +29,11 @@ Net::Elexol::EtherIO24 - Object interface for manipulating Elexol Ether I/O 24 u
 
 =cut
 
-our $VERSION = '0.12';
+our $VERSION = '0.13';
 
 =head1 VERSION
 
-Version 0.12.
+Version 0.13.
 
 Requires Perl 5.8.0.
 
