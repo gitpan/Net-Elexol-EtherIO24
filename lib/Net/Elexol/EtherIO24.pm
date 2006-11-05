@@ -29,11 +29,11 @@ Net::Elexol::EtherIO24 - Object interface for manipulating Elexol Ether I/O 24 u
 
 =cut
 
-our $VERSION = '0.11';
+our $VERSION = '0.12';
 
 =head1 VERSION
 
-Version 0.11.
+Version 0.12.
 
 Requires Perl 5.8.0.
 
@@ -69,7 +69,7 @@ along the way.
 It is thread savvy and will use threads if told to. It might perform
 adequately without threads, but various functionality would be reduced as
 a result. In particular, the module functions in a nice asynchronous
-way when it can use threads. Threads supoprt requires Perl 5.8.
+way when it can use threads. Threads support requires Perl 5.8.
 This module may not function correctly, or even compile, with an older Perl.
 Your Perl will require Threads to be enabled at compile-time, even if you
 don't use Threads.
