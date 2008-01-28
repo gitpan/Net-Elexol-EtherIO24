@@ -16,3 +16,15 @@ Revision history for Net-Elexol-EtherIO24
 0.13	2006-11-05 [chrisy]
 	- Some documentation tweaks
 
+0.15	2008-01-28 [chrisy]
+	- Documentation tweaks
+	- Add "indirect" updates - ie, perform updates in background,
+	  so that successive line writes cause less packet data, etc.
+	- Add "indirect" reads - this causes it to cache values retrieved from
+	  the Elexol device for a short interval
+	- Add hexdummps of packets in debug mode
+	- Fix some thread shutdown issues
+	- Split up the "status" and "recv" functions in service_loop into individual
+	  threads.
+	- Overhauled debugging output. Now centralised, and with a specifyable "prefix".
+

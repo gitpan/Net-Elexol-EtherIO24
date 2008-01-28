@@ -21,6 +21,7 @@ use threads::shared;
 use Socket;
 use IO::Socket::INET;
 use IO::Select;
+use Time::HiRes;
 
 
 =head1 NAME
@@ -29,11 +30,11 @@ Net::Elexol::EtherIO24 - Object interface for manipulating Elexol Ether I/O 24 u
 
 =cut
 
-our $VERSION = '0.13';
+our $VERSION = '0.15';
 
 =head1 VERSION
 
-Version 0.13.
+Version 0.15.
 
 Requires Perl 5.8.0.
 
@@ -64,7 +65,9 @@ variety of other things.
 
 The control protocol is relatively simplistic and UDP based. This Perl
 module attempts to abstract this protocol and add other features
-along the way.
+along the way. In particular, programmers are encouraged to investigate
+setting direct_writes => 0 and direct_reads => 0 in the constructor
+for network efficiency (since these are not yet the defaults).
 
 It is thread savvy and will use threads if told to. It might perform
 adequately without threads, but various functionality would be reduced as
@@ -74,20 +77,33 @@ This module may not function correctly, or even compile, with an older Perl.
 Your Perl will require Threads to be enabled at compile-time, even if you
 don't use Threads.
 
-It uses C<IO::Socket::INET> for network I/O. It was developed using Perl
-on a BSD system, but has been shown to function using Perl with Cygwin and
-Windows.
+It uses C<IO::Socket::INET> for network I/O and Time::HiRes for timing.
+It was developed using Perl on a FreeBSD and a Linux system, but has
+been known to function using Perl with Cygwin or ActivePerl on Windows.
 
 =cut
 
 # =============================================================================
 
 my $_debug = 0;
-my $_dbg = 'etherio24';
 my $_error = 0;
 
 share($_debug);
 share($_error);
+
+sub _dbg($$) {
+	my $self = shift;
+	my $line = shift;
+	my $debug = shift;
+	return if(!$self->{'debug'});
+	$debug = 0 if(!$debug);
+	return if($self->{'debug'} < $debug);
+	my $pfx = $self->{'debug_prefix'};
+	$pfx = 'eio' if(!$pfx);
+	$pfx .= ':'.threads->self->tid() if($self->{'threaded'});
+	print STDERR $pfx.': '.$line."\n";
+}
+
 
 # =============================================================================
 
@@ -145,6 +161,63 @@ often in that same thread we fire off a call to the status_fetch
 method, just to keep our status up-to-date, just in case. These
 timers are all integer seconds.
 
+I<recv_timeout> defaults to '1.0', I<service_recv_timeout> to '1.0' and
+I<service_status_fetch> to '60.0'.
+
+=item I<direct_writes>, I<direct_reads>
+
+These values, which default to '1' (on) control whether the various
+line_ methods directly query/update the Elexol device or whether they
+cache data and send/fetch the data to/fom the Elexol device periodically.
+
+The latter method (a setting of '0') can cause less network traffic if you
+are constantly polling the device at the expensse of a marginally longer interval 
+before the device is polled.  However, you must call the I<indirect_write_send>
+method in order to push out writes.
+
+If the I<close> method is called, any pending writes are sent.
+
+If data is received that would overwrite a pending write then the pending
+write is sent.
+
+=item I<indirect_write_interval>
+
+The interval, in seconds, between background writes to the Elexol device.
+When not using I<direct_writes>  this is the interval at which updates are
+sent.  Defaults to '0.1' (200ms).
+
+=item I<indirect_read_interval
+
+The interval, in fractional seconds, after which a cached read value from
+the Elexol device is considered invalid and must be refetched if that
+line group is queried. Defaults to '0.5' (500ms).
+
+=item I<read_before_write>
+
+(NOT YET IMPLEMENTED)
+
+Defaults to '0'. Forces any "write" functions to "read" the current status
+first. This is useful if you have multiple agents writing to the same
+Elexol device, where writing to a line could cause other lines to lose
+state written by another source.
+
+It should be noted that this is very risky since collisions will occur if
+two such agents attempt to write to the same group of lines at
+approximately the same time.
+
+=item I<debug>, I<debug_prefix>
+
+Controls debugging output. Default value of I<$debug> is inherited from the parent
+object (if you set it with C<Net::Elexol::EtherIO24::debug(1)> before cloning
+it).
+
+I<$debug_prefix> is displayed at the start of all debug output and defaults to
+'eio24'. You can set this, for example, if you have more than one EtherIO24 object
+so you can differentiate the debugging output of each.
+
+See also the C<debug> method. Also note that when using threads, the thread ID
+that produced the debugging output is included after the prefix.
+
 =item I<data>
 
 Various state information is contained within a hash. If not given, one
@@ -185,15 +258,26 @@ sub new {
 	# $self->{'data'} and be share()'ed. The best place to initialise
 	# such a thing is in init_state() further down.
 
+	$self->{'debug'} = $_debug;
+	$self->{'debug_prefix'} = 'eio24';
 	$self->{'prefetch_status'} = 1;
 	$self->{'presend_status'} = 0;
 	$self->{'threaded'} = 0;
-	$self->{'recv_timeout'} = 1;
-	$self->{'service_recv_timeout'} = 1;
+	$self->{'recv_timeout'} = 1.0;
+	$self->{'service_recv_timeout'} = 1.0;
 	$self->{'service_status_fetch'} = 60;
+	$self->{'direct_writes'} = 1;
+	$self->{'direct_reads'} = 1;
+	$self->{'indirect_write_interval'} = 0.1;
+	$self->{'indirect_read_interval'} = 0.5;
+	$self->{'read_before_write'} = 0;
 
-	foreach my $field (('prefetch_status', 'presend_status', 'threaded', 'recv_timeout',
-			'service_recv_timeout', 'service_status_fetch', )) {
+	foreach my $field (('debug', 'debug_prefix',
+			'prefetch_status', 'presend_status', 'threaded', 'recv_timeout',
+			'service_recv_timeout', 'service_status_fetch',
+			'direct_writes', 'direct_reads',
+			'indirect_write_interval', 'indirect_read_interval',
+			'read_before_write', )) {
 		$self->{$field} = $arg{$field} if(defined($arg{$field}));
 	}
 
@@ -209,8 +293,10 @@ sub new {
 	_init_state($self);
 
 	if($self->{'threaded'}) {
-		$self->{'thread_service'} = threads->new(\&_service_loop, $self);
-		$self->{'thread_service'}->detach;
+		$self->_dbg("we're going to be using threads, starting service threads...", 1);
+		$self->{'thread_indirect'} = threads->new(\&_service_indirect, $self);
+		$self->{'thread_status'} = threads->new(\&_service_status, $self);
+		$self->{'thread_recv'} = threads->new(\&_service_recv, $self);
 	}
 
 	if($self->{'prefetch_status'}) {
@@ -242,7 +328,10 @@ DESTROY {
 =item I<close>
 
 Closes network resources and waits (briefly) for any running threads to end. Should
-be called when the host application is ending.
+be called when the host application is ending or when the object is no longer needed.
+
+The object destructor will attempt to call this function when the world ends, but Perl
+might not be patient enough to wait for threads to end by that time.
 
 =cut
 
@@ -251,43 +340,89 @@ sub close {
 
 	return if(!$self->{'data'}->{'running'});
 
+	$self->indirect_write_send;  # flush anything pending
+
 	$self->{'data'}->{'running'} = 0;
-	$self->{'socket'}->close;
+	$self->{'socket'}->close if($self->{'socket'});
 
 	if($self->{'threaded'}) {
-		print "$_dbg: waiting for thread to die\n" if($_debug>1);
-		sleep($self->{'service_recv_timeout'}); # time enough for thread to close
+		foreach my $tname (('indirect', 'status', 'recv')) {
+			$self->_dbg("waiting for service '$tname' thread to die", 1);
+			my $t = $self->{'thread_'.$tname};
+			$t->join if($t);
+			$self->{'thread_'.$tname} = undef;
+		}
 	}
 }
 
-sub _service_loop {
+sub _service_indirect {
 	my $self = shift;
+	
+	$self->_dbg("service_indirect starting up", 1);
 
-	my $status_time = time() + $self->{'service_status_fetch'};
-
+	my $indirect_time = Time::HiRes::time() + $self->{'indirect_write_interval'};
 
 	while($self->{'data'}->{'running'}) {
-		if($self->{'service_status_fetch'} && $status_time < time()) {
+		if($self->{'indirect_write_interval'} && $indirect_time < Time::HiRes::time()) {
+			$indirect_time = Time::HiRes::time() + $self->{'indirect_write_interval'};
+			$self->indirect_write_send;
+		} else {
+			Time::HiRes::usleep(1000000);
+		}
+	}
+
+	$self->_dbg("service_indirect shutting down", 1);
+}
+
+sub _service_status {
+	my $self = shift;
+
+	$self->_dbg("service_status starting up", 1);
+
+	my $status_time = Time::HiRes::time() + $self->{'service_status_fetch'};
+
+	while($self->{'data'}->{'running'}) {
+		if($self->{'service_status_fetch'} && $status_time < Time::HiRes::time()) {
 			# 0=don't recv_result, which would cause a deadlock
+			$status_time = Time::HiRes::time() + $self->{'service_status_fetch'};
 			$self->status_fetch(0);
-			$status_time = time() + $self->{'service_status_fetch'};
+		} else {
+			Time::HiRes::usleep(1000000);
 		}
 
+	}
+
+	$self->_dbg("service_status shutting down", 1);
+}
+
+sub _service_recv {
+	my $self = shift;
+
+	$self->_dbg("service_recv starting up", 1);
+
+	while($self->{'data'}->{'running'}) {
 		$self->recv_command;
 	}
-	print "$_dbg: service_loop shutting down\n" if($_debug>1);
+
+	$self->_dbg("service_recv shutting down", 1);
 }
 
 =item I<debug($level)>
 
 The higher $level is, the more debugging is output. "3" is currently the useful
-limit.
+limit, though "4" will enable hex-dumps of all data sent and received.
+
+Can be called on the parent to set default debugging level, and on each object
+to control that objects debug level.
 
 =cut
 
 sub debug {
 	my $self = shift;
-	if(@_) { $_debug = shift; }
+	if(@_) {
+		$_debug = shift;
+		$self->{'debug'} = $_debug if(ref($self));
+	}
 	return $_debug;
 }
 
@@ -303,6 +438,58 @@ so that you can return an error should C<new()> fail to construct a new object.
 sub error {
 	my $self = shift;
 	return $_error;
+}
+
+=item I<dump_packet($packet, $offset, $increment)>
+
+Returns a string containing a HEX and ASCII dump of the packet in I<$packet>.
+
+This is used in the send/receive routines if a high enough debug level is set and
+is provided here in case someone else finds it useful.
+
+I<$offset> is optional and specifies the offset in the packet to start at, defaults to 0.
+
+I<$increment> is optional and specifies how many items to display per line, defaults to 16.
+
+=cut
+
+sub dump_packet {
+	my $self = shift;
+	my $packet = shift;
+	my $offset = shift;
+	my $incr = shift;
+
+	my $string = "";
+
+	$offset = 0 if(!defined($offset));
+	$incr = 16 if(!defined($incr));
+
+	while($offset < length($packet)) {
+		my $l = substr($packet, $offset, $incr);
+		my $hexstr = join(' ', map { sprintf "%02.2x", $_ } unpack("C*", $l));
+		my $ascstr = $l;
+		$ascstr =~ s/\W/./g;
+ 
+		my $hexlen = ($incr*3)-1;
+		$string .= sprintf("%04.4d  %-${hexlen}.${hexlen}s  %s\n", $offset, $hexstr, $ascstr);
+
+		$offset += $incr;
+	}
+	return $string;
+}
+
+sub _dbg_packet {
+	my $self = shift;
+	my $packet = shift;
+	my $debug = shift;
+	my $offset = shift;
+	my $incr = shift;
+
+	return if($self->{'debug'} < $debug);
+	my $string = $self->dump_packet($packet, $offset, $incr);
+	foreach my $line (split(/\n/, $string)) {
+		$self->_dbg($line, $debug);
+	}
 }
 
 # =============================================================================
@@ -708,6 +895,10 @@ sub _init_state {
 	foreach my $key (keys %$status_commands) {
 		$data->{$key} = 0;
 		share($data->{$key});
+		$data->{'changed '.$key} = 0;
+		share($data->{'changed '.$key});
+		$data->{'ts '.$key} = 0;
+		share($data->{'ts '.$key});
 	}
 	foreach my $addr (0..63) {
 		$data->{'rcvd eeprom '.$addr} = 0;
@@ -753,11 +944,11 @@ sub eeprom_fetch {
 	foreach my $addr (0..24) {
 		my $cmd = "'R".pack("CCC", $addr, 0, 0);
 		if(!send_command($self, $cmd)) {
-			print STDERR "WARNING: Unable to send eeprom request.\n";
+			$self->_dbg("WARNING: Unable to send eeprom request.", 0);
 			return 0;
 		} else {
 			if($recv && !recv_result($self, $cmd)) {
-				print STDERR "WARNING: Timeout waiting for eeprom reply.\n";
+				$self->_dbg("WARNING: Timeout waiting for eeprom reply.", 0);
 				return 0;
 			}
 		}
@@ -793,11 +984,11 @@ sub status_fetch {
 		$cmd .= $status_commands->{$key};
 	}
 	if(!send_command($self, $cmd)) {
-		print STDERR "WARNING: Unable to send status request.\n";
+		_dbg("WARNING: Unable to send status request.", 0);
 		return 0;
 	} else {
 		if($recv && !recv_result($self, $cmd)) {
-			print STDERR "WARNING: Error receiving status reply ($_error)\n" if($_debug);
+			$self->_dbg("WARNING: Error receiving status reply ($_error)", 0);
 			return 0;
 		}
 	}
@@ -822,10 +1013,39 @@ sub status_send {
 		$cmd .= $set_commands->{$key}.pack("C", $self->{$key});
 	}
 	if(!send_command($self, $cmd)) {
-		print STDERR "WARNING: Unable to send status.\n";
+		$self->_dbg("WARNING: Unable to send status.\n", 0);
 		return 0;
 	}
 	$self->{'data'}->{'last_status_send'} = time();
+}
+
+
+=item I<indirect_write_send()>
+
+This method performs various background tasks such as sending any updates to
+the Elexol device that are pending and retrieving status from the device.
+
+It should be called periodically (often) if you aren not using threads; otherwise
+it is not necessary (but not harmful) to call this.
+
+=cut
+
+sub indirect_write_send {
+	my $self = shift;
+
+	my $data = $self->{'data'};
+
+	# Send out any pending writes.
+
+	$self->_dbg("indirect_write_send: checking for pending writes", 5);
+
+	foreach my $key (sort keys %$status_commands) {  # sorting this means "dir" is written before "status" - important
+		if($data->{'changed '.$key}) {
+			$self->_dbg("indirect_write_send: \"$key\" is pending write...", 4);
+			send_command($self, $set_commands->{$key}.pack("C", $data->{$key}));
+			$data->{'changed '.$key} = 0;
+		}
+	}
 }
 
 # =============================================================================
@@ -836,6 +1056,7 @@ sub _decode_cmd {
 	my $type = shift;
 
 	my $txt = '';
+	$type = 0 if(!$type);
 	if($type eq 'hex_byte') {
 		# dump non-cmd chars as hex bytes
 		foreach my $i ($len..length($cmd)-1) {
@@ -901,12 +1122,12 @@ sub verify_send_command {
 			# found it!
 			my $len = length($c);
 			my $chk = substr($cmd, $start, $send_commands->{$c}->{'length'});
-			if($_debug>1) {
-				my $type = $send_commands->{$c}->{'type'} || 0;
+			if($self->{'debug'}>1) {
+				my $type = $send_commands->{$c}->{'type'};
 				my $txt = _decode_cmd($chk, $len, $type);
-				print "verify_send_command: cmd \"$c\" -> \"".
+				$self->_dbg("verify_send_command: cmd \"$c\" -> \"".
 					$send_commands->{$c}->{'desc'}."\"".
-					($txt ne ''?": $txt":"")."\n";
+					($txt ne ''?": $txt":""), 1);
 			}
 # Hmm, what was this block of code for? It seems to slow things down and occasionaly hang the whole thing!
 #			#if($set_map->{$c} && $self->{'threaded'}) {
@@ -918,10 +1139,10 @@ sub verify_send_command {
 #				my $timeout = time() + $self->{'recv_timeout'};
 #				lock($data->{$f});
 #				while(!$data->{$f}) {
-#					print "verify_send_command: flag snd check data->{$f} = ".$data->{$f}."\n" if($_debug>2);
+#					$self->_dbg("verify_send_command: flag snd check data->{$f} = ".$data->{$f}, 2);
 #					last if(!cond_timedwait($data->{$f}, $timeout));
 #				}
-#				print "verify_send_command: flag snd result data->{$f} = ".$data->{$f}."\n" if($_debug>2);
+#				$self->_dbg("verify_send_command: flag snd result data->{$f} = ".$data->{$f}, 2);
 #				if(!$data->{$f}) {
 #					$_error = 'Timeout waiting for outstanding status reply '.
 #						'while trying to send new status';
@@ -939,11 +1160,11 @@ sub verify_send_command {
 				}
 				lock($data->{$f});
 				$data->{$f} = 0;
-				print "verify_send_command: flag send data->{$f} set to 0\n" if($_debug>2);
+				$self->_dbg("verify_send_command: flag send data->{$f} set to 0", 2);
 			}
 			$start += $send_commands->{$c}->{'length'};
 		} else {
-			print "verify_send_command: cmd unknown: \"".substr($cmd, $start, 2)."\"\n" if($_debug);
+			$self->_dbg("verify_send_command: cmd unknown: \"".substr($cmd, $start, 2)."\"", 1);
 			$ok = 0;
 			last;
 		}
@@ -953,7 +1174,6 @@ sub verify_send_command {
 }
 
 =item I<verify_recv_command($cmd)>
-
 
 Not normally called directly.
 
@@ -976,46 +1196,57 @@ sub verify_recv_command {
 		# found it!
 		my $len = length($c);
 		my $chk = substr($cmd, 0, $recv_commands->{$c}->{'length'});
-		if(1||$_debug>1) {
-			my $type = $recv_commands->{$c}->{'type'} || 0;
+		if(1 || $self->{'debug'}>1) {  # !!! For some reason, not doing this causes a deadlock
+			my $type = $recv_commands->{$c}->{'type'};
 			my $txt = _decode_cmd($chk, $len, $type);
-			print "verify_recv_command: cmd \"$c\" -> \"".
+			$type = 0 if(!$type);
+			$self->_dbg("verify_recv_command: cmd \"$c\" -> \"".
 				$recv_commands->{$c}->{'desc'}."\"".
-				($txt ne ''?": $txt":"")."\n" if($_debug>1);
+				($txt ne ''?": $txt":""), 1);
 		}
 		# flag received status
 		if($c ne 'R') { # only if not an eeprom
 			my $f = 'rcvd '.$c;
 			lock($data->{$f});
 			$data->{$f} = 1;
-			print "verify_recv_command: flag rcvd data->{$f} = 1\n" if($_debug>2);
+			$self->_dbg("verify_recv_command: flag rcvd data->{$f} = 1", 2);
 			$data->{'rcvdcmd '.$c} = $chk; # store whole rcvd cmd too
 			cond_signal($data->{$f});
 		}
 
-		if($set_map->{$c}) { # save new status
+		if(defined($set_map->{$c})) { # save new status
 			my $k = $set_map->{$c};
+			if($data->{'changed '.$k}) {
+				# we have a pending write on the same value - flush all pending writes!
+				# This does mean that, at least temporarily, we might not reflect our
+				# written state correctly, but it will recover on a subsequent read.
+				# We don't update the timestamp in this case, to encourage a faster
+				# refresh.
+				$self->indirect_write_send;
+			} else {
+				$data->{'ts '.$k} = Time::HiRes::time();
+			}
 			$data->{$k} = unpack("x$len C", $cmd);
-			print "verify_recv_command: set_map \"$c\" ($k) = ".
-				sprintf("%02.2x", $data->{$k})."\n" if($_debug>1);
+			$self->_dbg("verify_recv_command: set_map \"$c\" ($k) = ".
+				sprintf("%02.2x", $data->{$k}), 2);
 		} elsif($c eq 'R') { # save eeprom data
 			# eepromness
 			my($addr, $msb, $lsb) = unpack("x$len CCC", $chk);
 			$data->{'eeprom '.$addr} = ($msb * 256) + $lsb;
-			print "verify_recv_command: eeprom \"$c\" addr $addr = ".
-				sprintf("%02.2x %02.2x", $msb, $lsb)."\n" if($_debug>1);
+			$self->_dbg("verify_recv_command: eeprom \"$c\" addr $addr = ".
+				sprintf("%02.2x %02.2x", $msb, $lsb), 2);
 
 			my $f = 'rcvd eeprom '.$addr;
 			lock($data->{$f});
 			$data->{$f} = 1;
-			print "verify_recv_command: flag rcvd data->{$f} set to 1\n" if($_debug>2);
+			$self->_dbg("verify_recv_command: flag rcvd data->{$f} set to 1", 2);
 			$data->{'rcvdcmd '.$c} = $chk; # store whole rcvd cmd too
 			cond_signal($data->{$f});
 		}
 		return $recv_commands->{$c}->{'length'};
 	}
 
-	print "verify_recv_command: cmd unknown: \"".substr($cmd, 0, 2)."\"\n" if($_debug);
+	$self->_dbg("verify_recv_command: cmd unknown: \"".substr($cmd, 0, 2)."\"", 0);
 
 	return 0;
 }
@@ -1058,7 +1289,7 @@ sub recv_command {
 	my $self = shift;
 
 	my $data = $self->{'data'};
-	my $cmds = recv_pkt($self);
+	my $cmds = $self->recv_pkt;
 	if(!$cmds) {
 		return 0;
 	}
@@ -1067,8 +1298,8 @@ sub recv_command {
 	while(length($cmds)) {
 		my $len = verify_recv_command($self, $cmds);
 		if(!$len) {
-			print "recv_command encountered invalid command. Returning ".
-				scalar(@cmds)." commands to caller.\n" if($_debug);
+			$self->_dbg("recv_command encountered invalid command. Returning ".
+				scalar(@cmds)." commands to caller.", 0);
 			last;
 		}
 		push(@cmds, substr($cmds, 0, $len));
@@ -1098,7 +1329,10 @@ sub recv_result {
 	my $data = $self->{'data'};
 	if($self->{'threaded'}) {
 		# wait for our result to arrive
-		my $c = _find_cmd($cmd, $send_commands) || _find_cmd($cmd, $recv_commands) || $cmd;
+		my $c = _find_cmd($cmd, $send_commands);
+		$c = _find_cmd($cmd, $recv_commands) if(!$c);
+		$c = $cmd if(!$c);
+
 		if($cmd_map->{$c}) {
 			$c = $cmd_map->{$c};
 		}
@@ -1112,10 +1346,10 @@ sub recv_result {
 		my $timeout = time() + $self->{'recv_timeout'};
 		lock($data->{$f});
 		while(!$data->{$f}) {
-			print "recv_result: flag check data->{$f} = ".$data->{$f}."\n" if($_debug>2);
+			$self->_dbg("recv_result: flag check data->{$f} = ".$data->{$f}, 2);
 			last if(!cond_timedwait($data->{$f}, $timeout));
 		}
-		print "recv_result: flag result data->{$f} = ".$data->{$f}."\n" if($_debug>2);
+		$self->_dbg("recv_result: flag result data->{$f} = ".$data->{$f}, 2);
 		if(!$data->{$f}) {
 			$_error = 'Timeout waiting for reply';
 			return undef;
@@ -1146,9 +1380,11 @@ sub send_pkt {
 	my $pkt = shift;
 
 	my $socket = $self->{'socket'};
-	my $ret =$socket->send($pkt);
+	$self->_dbg("send_pkt: Sending ".length($pkt)." bytes", 1);
+	$self->_dbg_packet($pkt, 3);
+	my $ret = $socket->send($pkt);
 	if(!defined($ret) || $ret<=0) {
-		print "send_pkt: Unable to send packet: $!\n";
+		$self->_dbg("send_pkt: Unable to send packet: $!", 0);
 		return 0;
 	}
 	return 1;
@@ -1168,8 +1404,9 @@ sub recv_pkt {
 
 	# see if anything waits for us
 	my @ready = ();
+	my $timeout = $self->{'service_recv_timeout'};
 	my $sel = new IO::Select($socket);
-	@ready = $sel->can_read($self->{'service_recv_timeout'});
+	@ready = $sel->can_read($timeout);
 
 	foreach my $fh (@ready) {
 		if($fh = $socket) {
@@ -1177,10 +1414,11 @@ sub recv_pkt {
 			my $pkt;
 			if(!defined($socket->recv($pkt, 8192))) {
 				$_error = "Unable to receive packet: $!";
-				print "recv_pkt: Unable to receive packet: $!\n" if($_debug);
+				$self->_dbg("recv_pkt: Unable to receive packet: $!", 0);
 				return 0;
 			}
-			print "recv_pkt: received ".length($pkt)." bytes\n" if($_debug>1);
+			$self->_dbg("recv_pkt: Received ".length($pkt)." bytes", 1);
+			$self->_dbg_packet($pkt, 3);
 			$_error = 0;
 			return $pkt;
 		} else {
@@ -1218,6 +1456,33 @@ sub reboot {
 	return send_command($self, "'@".pack('C*', 0, 0xaa, 0x55));
 }
 
+sub _chkts {
+	my $self = shift;
+	my $item = shift;
+
+	# Check the timestamp for an item and if in need of a refresh, go
+	# refresh it and wait for the result.
+
+	my $data = $self->{'data'};
+
+	my $ts = $data->{'ts '.$item} + $self->{'indirect_read_interval'};
+	my $now = Time::HiRes::time();
+	if($self->{'direct_reads'} || ($ts < $now)) {
+		if($self->{'debug'}>3) {
+			if($self->{'direct_reads'}) {
+				$self->_dbg("_chts: direct_reads, fetching data...", 3);
+			} else {
+				$self->_dbg("_chkts: ts for '$item' (ts=$ts now=$now iv=".$self->{'indirect_read_interval'}.") expired, fetching...", 3);
+			}
+		}
+		my $cmd = $status_commands->{$item};
+		send_command($self, $cmd);
+		recv_result($self, $cmd);
+		return 1;
+	}
+	return 0;
+}
+
 =item I<set_line($line, $val)>
 
 Sets the line to boolean val and sends to EtherIO module.
@@ -1242,19 +1507,25 @@ sub set_line {
 	my $var;
 	$var = "dir ".$linegrp;
 	if(($data->{$var} & $bitval)) {
-		print "set_line: line $line ignored, is input\n" if($_debug > 1);
+		$self->_dbg("set_line: line $line ignored, is input", 1);
 		return 0;
 	}
 
 	$var = "status ".$linegrp;
 	if($val) {
-		print "set_line: line $line set to ON\n" if($_debug > 1);
+		$self->_dbg("set_line: line $line set to ON", 1);
 		$data->{$var} |= $bitval;
 	} else {
-		print "set_line: line $line set to OFF\n" if($_debug > 1);
+		$self->_dbg("set_line: line $line set to OFF", 1);
 		$data->{$var} &= ~$bitval;
 	}
-	return send_command($self, $set_commands->{$var}.pack("C", $data->{$var}));
+
+	if($self->{'direct_writes'}) {
+		return send_command($self, $set_commands->{$var}.pack("C", $data->{$var}));
+	} else {
+		$data->{'changed '.$var} = 1;
+		return 1;
+	}
 }
 
 =item I<get_line_live($line)>
@@ -1282,14 +1553,17 @@ sub get_line_live {
 
 	$var = "status ".$linegrp;
 	my $val = (($data->{$var} & $bitval) != 0) + 0;
-	print "get_line_live: line $line = ".($val?"ON":"OFF")."\n" if($_debug > 1);
+	$self->_dbg("get_line_live: line $line = ".($val?"ON":"OFF"), 1);
 	return $val;
 }
 
 =item I<get_line($line)>
 
-Returns stored boolean value of line. If it's an
-input, gets the live value instead.
+Returns the value of the specified I/O line.
+
+If using direct_reads then this method always queries the device. Otherwise
+this method uses the cached value, unless expired (See I<indirect_read_interval>
+constructor parameter) whereupon it will query the device.
 
 =cut
 
@@ -1304,19 +1578,10 @@ sub get_line {
 
 	my ($linegrp, $bitno, $bitval) = _getgrp($line);
 
-	my $var;
-	$var = "dir ".$linegrp;
-	if(($data->{$var} & $bitval)) {
-		# get live value
-		print "get_line: getting live value for line $line\n" if($_debug > 1);
-		$var = "status ".$linegrp;
-		my $cmd = $status_commands->{$var};
-		send_command($self, $cmd);
-		recv_result($self, $cmd);
-	}
-	$var = "status ".$linegrp;
+	my $var = "status ".$linegrp;
+	$self->_chkts($var); # check timestamp
 	my $val = (($data->{$var} & $bitval) != 0) + 0;
-	print "get_line: line $line = ".($val?"ON":"OFF")."\n" if($_debug > 1);
+	$self->_dbg("get_line: line $line = ".($val?"ON":"OFF"), 1);
 	return $val;
 }
 
@@ -1341,18 +1606,26 @@ sub set_line_dir {
 	my $var;
 	$var = "dir ".$linegrp;
 	if($dir) {
-		print "set_line_dir: line $line set to ON\n" if($_debug > 1);
+		$self->_dbg("set_line_dir: line $line set to ON", 1);
 		$data->{$var} |= $bitval;
 	} else {
-		print "set_line_dir: line $line set to OFF\n" if($_debug > 1);
+		$self->_dbg("set_line_dir: line $line set to OFF", 1);
 		$data->{$var} &= ~$bitval;
 	}
-	return send_command($self, $set_commands->{$var}.pack("C", $data->{$var}));
+
+	if($self->{'direct_writes'}) {
+		return send_command($self, $set_commands->{$var}.pack("C", $data->{$var}));
+	} else {
+		$data->{'changed '.$var} = 1;
+		return 1;
+	}
 }
 
 =item I<get_line_dir($line)>
 
-Returns (stored) direction setting for $line. 0 = output, 1 = input.
+Returns direction setting for $line. 0 = output, 1 = input.
+
+See I<get_line> for direct_reads and cachine heuristics.
 
 =cut
 
@@ -1369,8 +1642,9 @@ sub get_line_dir {
 
 	my $var;
 	$var = "dir ".$linegrp;
+	$self->_chkts($var); # check timestamp
 	my $val = (($data->{$var} & $bitval) != 0) + 0;
-	print "get_line_dir: line $line = ".($val?"IN":"OUT")."\n" if($_debug > 1);
+	$self->_dbg("get_line_dir: line $line = ".($val?"IN":"OUT"), 1);
 	return $val;
 }
 
@@ -1395,18 +1669,26 @@ sub set_line_pullup {
 	my $var;
 	$var = "pullup ".$linegrp;
 	if($pullup) {
-		print "set_line_pullup: line $line set to pullup ON\n" if($_debug > 1);
+		$self->_dbg("set_line_pullup: line $line set to pullup ON", 1);
 		$data->{$var} |= $bitval;
 	} else {
-		print "set_line_pullup: line $line set to pullup OFF\n" if($_debug > 1);
+		$self->_dbg("set_line_pullup: line $line set to pullup OFF", 1);
 		$data->{$var} &= ~$bitval;
 	}
-	return send_command($self, $set_commands->{$var}.pack("C", $data->{$var}));
+
+	if($self->{'direct_writes'}) {
+		return send_command($self, $set_commands->{$var}.pack("C", $data->{$var}));
+	} else {
+		$data->{'changed '.$var} = 1;
+		return 1;
+	}
 }
 
 =item I<get_line_pullup($line)>
 
-Returns (stored) pullup setting for $line. 0 = pullup off, 1 = pullup on.
+Returns pullup setting for $line. 0 = pullup off, 1 = pullup on.
+
+See I<get_line> for direct_reads and cachine heuristics.
 
 =cut
 
@@ -1423,8 +1705,9 @@ sub get_line_pullup {
 
 	my $var;
 	$var = "pullup ".$linegrp;
+	$self->_chkts($var); # check timestamp
 	my $val = (($data->{$var} & $bitval) != 0) + 0;
-	print "get_line_pullup: line $line = ".($val?"pullup ON":"pullup OFF")."\n" if($_debug > 1);
+	$self->_dbg("get_line_pullup: line $line = ".($val?"pullup ON":"pullup OFF"), 1);
 	return $val;
 }
 
@@ -1449,18 +1732,26 @@ sub set_line_thresh {
 	my $var;
 	$var = "thresh ".$linegrp;
 	if($thresh) {
-		print "set_line_thresh: line $line set to 1.4v (CMOS)\n" if($_debug > 1);
+		$self->_dbg("set_line_thresh: line $line set to 1.4v (CMOS)", 1);
 		$data->{$var} |= $bitval;
 	} else {
-		print "set_line_thresh: line $line set to 2.5v (TTL)\n" if($_debug > 1);
+		$self->_dbg("set_line_thresh: line $line set to 2.5v (TTL)", 1);
 		$data->{$var} &= ~$bitval;
 	}
-	return send_command($self, $set_commands->{$var}.pack("C", $data->{$var}));
+
+	if($self->{'direct_writes'}) {
+		return send_command($self, $set_commands->{$var}.pack("C", $data->{$var}));
+	} else {
+		$data->{'changed '.$var} = 1;
+		return 1;
+	}
 }
 
 =item I<get_line_thresh($line)>
 
-Returns (stored) threshold setting for $line. 0 = 2.5v (TTL), 1 = 1.4v (CMOS).
+Returns threshold setting for $line. 0 = 2.5v (TTL), 1 = 1.4v (CMOS).
+
+See I<get_line> for direct_reads and cachine heuristics.
 
 =cut
 
@@ -1477,8 +1768,9 @@ sub get_line_thresh {
 
 	my $var;
 	$var = "thresh ".$linegrp;
+	$self->_chkts($var); # check timestamp
 	my $val = (($data->{$var} & $bitval) != 0) + 0;
-	print "get_line_thresh: line $line = ".($val?"1.4v (CMOS)":"2.5v (TTL)")."\n" if($_debug > 1);
+	$self->_dbg("get_line_thresh: line $line = ".($val?"1.4v (CMOS)":"2.5v (TTL)"), 1);
 	return $val;
 }
 
@@ -1503,18 +1795,26 @@ sub set_line_schmitt {
 	my $var;
 	$var = "schmitt ".$linegrp;
 	if($schmitt) {
-		print "set_line_schmitt: line $line set to ON\n" if($_debug > 1);
+		$self->_dbg("set_line_schmitt: line $line set to ON", 1);
 		$data->{$var} |= $bitval;
 	} else {
-		print "set_line_schmitt: line $line set to OFF\n" if($_debug > 1);
+		$self->_dbg("set_line_schmitt: line $line set to OFF", 1);
 		$data->{$var} &= ~$bitval;
 	}
-	return send_command($self, $set_commands->{$var}.pack("C", $data->{$var}));
+
+	if($self->{'direct_writes'}) {
+		return send_command($self, $set_commands->{$var}.pack("C", $data->{$var}));
+	} else {
+		$data->{'changed '.$var} = 1;
+		return 1;
+	}
 }
 
 =item I<get_line_schmitt($line)>
 
-Returns (stored) schmitt setting for $line. 0 = off, 1 = on.
+Returns schmitt setting for $line. 0 = off, 1 = on.
+
+See I<get_line> for direct_reads and cachine heuristics.
 
 =cut
 
@@ -1531,8 +1831,9 @@ sub get_line_schmitt {
 
 	my $var;
 	$var = "schmitt ".$linegrp;
+	$self->_chkts($var); # check timestamp
 	my $val = (($data->{$var} & $bitval) != 0) + 0;
-	print "get_line_schmitt: line $line = ".($val?"IN":"OUT")."\n" if($_debug > 1);
+	$self->_dbg("get_line_schmitt: line $line = ".($val?"IN":"OUT"), 1);
 	return $val;
 }
 
@@ -1565,8 +1866,8 @@ sub set_autoscan_addr {
 		eeprom_fetch($self, 1);  # 1=wait for response
 	}
 
-		$data->{'eeprom 5'} &= ~5; # subtract bit 4 to enable autoscan
-		send_command($self, "'W".pack('C*', 5, ($data->{'eeprom 5'} >> 8) & 0xff, $data->{'eeprom 5'} & 0xff));
+	$data->{'eeprom 5'} &= ~5; # subtract bit 4 to enable autoscan
+	send_command($self, "'W".pack('C*', 5, ($data->{'eeprom 5'} >> 8) & 0xff, $data->{'eeprom 5'} & 0xff));
 }
 
 =item I<set_autoscan_line($line, $state)>
@@ -1605,8 +1906,8 @@ sub set_startup_status {
 	my $data = $self->{'data'};
 
 	if(!$self->{'prefetch_status'}) {
-		status_fetch($self, 1);  # 1=wait for response
-		eeprom_fetch($self, 1);  # 1=wait for response
+		$self->status_fetch(1);  # 1=wait for response
+		$self->eeprom_fetch(1);  # 1=wait for response
 	}
 
 	my $fields = {
@@ -1671,7 +1972,7 @@ your bug as I make changes.
 
 =head1 COPYRIGHT & LICENSE
 
-Copyright 2005 Chris Luke, all rights reserved.
+Copyright 2005..2008 Chris Luke, all rights reserved.
 
 This program is free software; you can redistribute it and/or modify it
 under the same terms as Perl itself.
