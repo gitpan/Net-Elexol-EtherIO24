@@ -28,3 +28,6 @@ Revision history for Net-Elexol-EtherIO24
 	  threads.
 	- Overhauled debugging output. Now centralised, and with a specifyable "prefix".
 
+0.16	2008-01-29 [chrisy]
+
+

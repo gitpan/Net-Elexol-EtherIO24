@@ -30,11 +30,11 @@ Net::Elexol::EtherIO24 - Object interface for manipulating Elexol Ether I/O 24 u
 
 =cut
 
-our $VERSION = '0.15';
+our $VERSION = '0.16';
 
 =head1 VERSION
 
-Version 0.15.
+Version 0.16.
 
 Requires Perl 5.8.0.
 
@@ -186,7 +186,7 @@ The interval, in seconds, between background writes to the Elexol device.
 When not using I<direct_writes>  this is the interval at which updates are
 sent.  Defaults to '0.1' (200ms).
 
-=item I<indirect_read_interval
+=item I<indirect_read_interval>
 
 The interval, in fractional seconds, after which a cached read value from
 the Elexol device is considered invalid and must be refetched if that
