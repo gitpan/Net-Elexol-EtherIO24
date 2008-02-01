@@ -30,11 +30,11 @@ Net::Elexol::EtherIO24 - Object interface for manipulating Elexol Ether I/O 24 u
 
 =cut
 
-our $VERSION = '0.16';
+our $VERSION = '0.17';
 
 =head1 VERSION
 
-Version 0.16.
+Version 0.17.
 
 Requires Perl 5.8.0.
 
@@ -69,7 +69,7 @@ along the way. In particular, programmers are encouraged to investigate
 setting direct_writes => 0 and direct_reads => 0 in the constructor
 for network efficiency (since these are not yet the defaults).
 
-It is thread savvy and will use threads if told to. It might perform
+It is thread savvy and will use threads unless told not to. It might perform
 adequately without threads, but various functionality would be reduced as
 a result. In particular, the module functions in a nice asynchronous
 way when it can use threads. Threads support requires Perl 5.8.
@@ -77,7 +77,7 @@ This module may not function correctly, or even compile, with an older Perl.
 Your Perl will require Threads to be enabled at compile-time, even if you
 don't use Threads.
 
-It uses C<IO::Socket::INET> for network I/O and Time::HiRes for timing.
+It uses C<IO::Socket::INET> for network I/O and C<Time::HiRes> for timing.
 It was developed using Perl on a FreeBSD and a Linux system, but has
 been known to function using Perl with Cygwin or ActivePerl on Windows.
 
@@ -148,7 +148,7 @@ this status, then this feature might become useful!
 Enables Perl ithreads and creates a thread to listen to replies from the
 EtherIO24 unit. This currently requires Perl 5.8 to function. For the
 most part, client applications do not need to be thread aware, but some
-functionality may change this assumption.
+functionality may change this assumption. Defaults to '1'.
 
 =item I<recv_timeout>, I<service_recv_timeout>, I<service_status_fetch>
 
@@ -171,14 +171,16 @@ line_ methods directly query/update the Elexol device or whether they
 cache data and send/fetch the data to/fom the Elexol device periodically.
 
 The latter method (a setting of '0') can cause less network traffic if you
-are constantly polling the device at the expensse of a marginally longer interval 
+are constantly polling the device at the expense of a marginally longer interval 
 before the device is polled.  However, you must call the I<indirect_write_send>
-method in order to push out writes.
+method in order to push out writes quickly, or especially if you are not
+using threads.
 
-If the I<close> method is called, any pending writes are sent.
+By default, if the I<close> method is called any pending writes are sent
+(See I<flush_writes_at_close> below).
 
-If data is received that would overwrite a pending write then the pending
-write is sent.
+If data is received that would overwrite a pending write then any pending
+writes are sent.
 
 =item I<indirect_write_interval>
 
@@ -194,12 +196,9 @@ line group is queried. Defaults to '0.5' (500ms).
 
 =item I<read_before_write>
 
-(NOT YET IMPLEMENTED)
-
 Defaults to '0'. Forces any "write" functions to "read" the current status
-first. This is useful if you have multiple agents writing to the same
-Elexol device, where writing to a line could cause other lines to lose
-state written by another source.
+first.  However, if I<indirect_reads> is '0', it will used the cached value
+if it has not yet expired.
 
 It should be noted that this is very risky since collisions will occur if
 two such agents attempt to write to the same group of lines at
@@ -217,6 +216,11 @@ so you can differentiate the debugging output of each.
 
 See also the C<debug> method. Also note that when using threads, the thread ID
 that produced the debugging output is included after the prefix.
+
+=item I<flush_writes_at_close>
+
+Defaults to '1', on. Determines whether the I<indirect_write_send> method is
+called at I<close> to flush any pending writes.
 
 =item I<data>
 
@@ -262,7 +266,7 @@ sub new {
 	$self->{'debug_prefix'} = 'eio24';
 	$self->{'prefetch_status'} = 1;
 	$self->{'presend_status'} = 0;
-	$self->{'threaded'} = 0;
+	$self->{'threaded'} = 1;
 	$self->{'recv_timeout'} = 1.0;
 	$self->{'service_recv_timeout'} = 1.0;
 	$self->{'service_status_fetch'} = 60;
@@ -271,13 +275,14 @@ sub new {
 	$self->{'indirect_write_interval'} = 0.1;
 	$self->{'indirect_read_interval'} = 0.5;
 	$self->{'read_before_write'} = 0;
+	$self->{'flush_writes_at_close'} = 1;
 
 	foreach my $field (('debug', 'debug_prefix',
 			'prefetch_status', 'presend_status', 'threaded', 'recv_timeout',
 			'service_recv_timeout', 'service_status_fetch',
 			'direct_writes', 'direct_reads',
 			'indirect_write_interval', 'indirect_read_interval',
-			'read_before_write', )) {
+			'read_before_write', 'flush_writes_at_close', )) {
 		$self->{$field} = $arg{$field} if(defined($arg{$field}));
 	}
 
@@ -340,7 +345,7 @@ sub close {
 
 	return if(!$self->{'data'}->{'running'});
 
-	$self->indirect_write_send;  # flush anything pending
+	$self->indirect_write_send if($self->{'flush_writes_at_close'});;  # flush anything pending
 
 	$self->{'data'}->{'running'} = 0;
 	$self->{'socket'}->close if($self->{'socket'});
@@ -919,6 +924,22 @@ sub _init_state {
 			'last_eeprom_fetch')) {
 		$data->{$var} = 0;
 		share($data->{$var});
+	}
+}
+
+=item I<clear_cache>
+
+Resets the timestamps on all cached data forcing the next read
+to query the Elexol device.
+
+=cut
+
+sub clear_cache {
+	my $self = shift;
+	my $data = $self->{'data'};
+
+	foreach my $key (keys %$status_commands) {
+		$data->{'ts '.$key} = 0;
 	}
 }
 
@@ -1512,6 +1533,7 @@ sub set_line {
 	}
 
 	$var = "status ".$linegrp;
+	$self->_chkts($var) if($self->{'read_before_write'}); # read (possibly cached) data if we read_before_write
 	if($val) {
 		$self->_dbg("set_line: line $line set to ON", 1);
 		$data->{$var} |= $bitval;
@@ -1605,6 +1627,7 @@ sub set_line_dir {
 
 	my $var;
 	$var = "dir ".$linegrp;
+	$self->_chkts($var) if($self->{'read_before_write'}); # read (possibly cached) data if we read_before_write
 	if($dir) {
 		$self->_dbg("set_line_dir: line $line set to ON", 1);
 		$data->{$var} |= $bitval;
@@ -1668,6 +1691,7 @@ sub set_line_pullup {
 
 	my $var;
 	$var = "pullup ".$linegrp;
+	$self->_chkts($var) if($self->{'read_before_write'}); # read (possibly cached) data if we read_before_write
 	if($pullup) {
 		$self->_dbg("set_line_pullup: line $line set to pullup ON", 1);
 		$data->{$var} |= $bitval;
@@ -1731,6 +1755,7 @@ sub set_line_thresh {
 
 	my $var;
 	$var = "thresh ".$linegrp;
+	$self->_chkts($var) if($self->{'read_before_write'}); # read (possibly cached) data if we read_before_write
 	if($thresh) {
 		$self->_dbg("set_line_thresh: line $line set to 1.4v (CMOS)", 1);
 		$data->{$var} |= $bitval;
@@ -1794,6 +1819,7 @@ sub set_line_schmitt {
 
 	my $var;
 	$var = "schmitt ".$linegrp;
+	$self->_chkts($var) if($self->{'read_before_write'}); # read (possibly cached) data if we read_before_write
 	if($schmitt) {
 		$self->_dbg("set_line_schmitt: line $line set to ON", 1);
 		$data->{$var} |= $bitval;

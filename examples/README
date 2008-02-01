@@ -6,3 +6,7 @@ Net::Elexol::EtherIO24 module can be used.
 
 YMMV.
 
+'irig.pl' is the script I use to control my lawn & veggie garden irrigation system.
+
+'write_fixed_address.pl' is a standalone script to program the fixed address in the EEPROM of the EIO24.
+

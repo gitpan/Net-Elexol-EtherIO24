@@ -1,7 +1,7 @@
 # http://module-build.sourceforge.net/META-spec.html
 #XXXXXXX This is a prototype!!!  It will change in the future!!! XXXXX#
 name:         Net-Elexol-EtherIO24
-version:      0.16
+version:      0.17
 version_from: lib/Net/Elexol/EtherIO24.pm
 installdirs:  site
 requires:
@@ -11,6 +11,7 @@ requires:
     Test::More:                    0
     threads:                       0
     threads::shared:               0
+    Time::HiRes:                   0
 
 distribution_type: module
 generated_by: ExtUtils::MakeMaker version 6.17

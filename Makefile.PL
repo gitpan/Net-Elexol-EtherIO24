@@ -15,6 +15,7 @@ WriteMakefile(
 	'Socket' => 0,
 	'IO::Socket::INET' => 0,
 	'IO::Select' => 0,
+	'Time::HiRes' => 0,
     },
     dist                => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
     clean               => { FILES => 'Net-Elexol-EtherIO24-*' },

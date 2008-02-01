@@ -28,6 +28,10 @@ Revision history for Net-Elexol-EtherIO24
 	  threads.
 	- Overhauled debugging output. Now centralised, and with a specifyable "prefix".
 
-0.16	2008-01-29 [chrisy]
-
+0.17	2008-02-01 [chrisy]
+	- Fix module dependencies.
+	- Add 'read_before_write' feature.
+	- Add 'flush_writes_at_close' tweakable.
+	- Add 'clear_cache' method.
+	- Make threaded=>1 the default. (instead of 0)
 
