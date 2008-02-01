@@ -2,6 +2,7 @@
 Changes
 examples/eeprom_test.pl
 examples/irig.pl
+examples/write_fixed_address.pl
 examples/README
 lib/Net/Elexol/EtherIO24.pm
 Makefile.PL

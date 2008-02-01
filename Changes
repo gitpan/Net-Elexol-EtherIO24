@@ -35,3 +35,6 @@ Revision history for Net-Elexol-EtherIO24
 	- Add 'clear_cache' method.
 	- Make threaded=>1 the default. (instead of 0)
 
+0.18	2008-02-01 [chrisy]
+	- Fix stupid MANIFEST mistake.
+
