@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               Net-Elexol-EtherIO24
-version:            0.20
+version:            0.21
 abstract:           Threaded object interface for manipulating Elexol Ether I/O 24 units with Perl
 author:
     - Chris Luke <chrisy@flirble.org>

@@ -30,11 +30,11 @@ Net::Elexol::EtherIO24 - Threaded object interface for manipulating Elexol Ether
 
 =cut
 
-our $VERSION = '0.20';
+our $VERSION = '0.21';
 
 =head1 VERSION
 
-Version 0.20.
+Version 0.21.
 
 Requires Perl 5.8.0.
 
@@ -250,6 +250,11 @@ I<$new_value> is the value just received.
 
 I<$old_value> is the previous value.
 
+=item I<wakeup>
+
+If true then we will attempt to wakeup the module at initialisation. See the
+'wakeup' method for details.
+
 =item I<data>
 
 Various state information is contained within a hash. If not given, one
@@ -273,18 +278,10 @@ sub new {
 	my %arg = @_;
 
 	my $class = ref($proto) || $proto;
-	my $self  = {};
+	my $self = {};
 
-	return 0 if(!$arg{'target_addr'});
-
-	$self->{'socket'} = IO::Socket::INET->new(
-			PeerAddr =>	$arg{'target_addr'},
-			PeerPort =>	$arg{'target_port'} || '2424',
-			Proto =>	'udp',
-			ReuseAddr =>	1,
-	);
-	if(!$self->{'socket'}) {
-		$_error = "Net::Elexol::EtherIO24->new can't create socket: $@\n";
+	if(!$arg{'target_addr'}) {
+		$_error = "No target_addr specified";
 		return undef;
 	}
 
@@ -296,6 +293,7 @@ sub new {
 
 	$self->{'debug'} = $_debug;
 	$self->{'debug_prefix'} = 'eio24';
+	$self->{'target_port'} = '2424';
 	$self->{'prefetch_status'} = 1;
 	$self->{'presend_status'} = 0;
 	$self->{'threaded'} = 1;
@@ -312,12 +310,13 @@ sub new {
 	$self->{'async_status_sub'} = undef;
 
 	foreach my $field (('debug', 'debug_prefix',
+			'target_addr', 'target_port',
 			'prefetch_status', 'presend_status', 'threaded', 'recv_timeout',
 			'service_recv_timeout', 'service_status_fetch',
 			'direct_writes', 'direct_reads',
 			'indirect_write_interval', 'indirect_read_interval',
 			'read_before_write', 'flush_writes_at_close', 'eeprom_read_retries',
-			'async_status_sub', )) {
+			'async_status_sub', 'wakeup', )) {
 		$self->{$field} = $arg{$field} if(defined($arg{$field}));
 	}
 
@@ -331,6 +330,19 @@ sub new {
 	}
 
 	_init_state($self);
+
+	$self->wakeup if($arg{'wakeup'});
+
+	$self->{'socket'} = IO::Socket::INET->new(
+			PeerAddr =>	$self->{'target_addr'},
+			PeerPort =>	$self->{'target_port'},
+			Proto =>	'udp',
+			ReuseAddr =>	1,
+	);
+	if(!$self->{'socket'}) {
+		$_error = "Net::Elexol::EtherIO24->new can't create socket: $@\n";
+		return undef;
+	}
 
 	if($self->{'threaded'}) {
 		$self->_dbg("we're going to be using threads, starting service threads...", 1);
@@ -358,7 +370,7 @@ sub new {
 
 DESTROY {
 	my $self = shift;
-	$self->close;
+	$self->close(1);
 }
 
 =head1 METHODS
@@ -377,22 +389,73 @@ might not be patient enough to wait for threads to end by that time.
 
 sub close {
 	my $self = shift;
+	my $quick = shift || 0;
 
 	return if(!$self->{'data'}->{'running'});
 
-	$self->indirect_write_send if($self->{'flush_writes_at_close'});;  # flush anything pending
+	$self->indirect_write_send if(!$quick && $self->{'flush_writes_at_close'});;  # flush anything pending
 
-	$self->{'data'}->{'running'} = 0;
-	$self->{'socket'}->close if($self->{'socket'});
+	$self->{'data'}->{'running'} = 0; # should signal threads to exit
 
 	if($self->{'threaded'}) {
 		foreach my $tname (('indirect', 'status', 'recv')) {
 			$self->_dbg("waiting for service '$tname' thread to die", 1);
 			my $t = $self->{'thread_'.$tname};
-			$t->join if($t);
+			#$t->join if($t);
+			$t->detach if($t);
 			$self->{'thread_'.$tname} = undef;
 		}
 	}
+
+	if($self->{'socket'}) {
+		$self->{'socket'}->close;
+		$self->{'socket'} = undef;
+	}
+}
+
+=item I<wakeup>
+
+Send a handful of UDP packets to the device to 'wake it up'. The intention
+is to trigger MAC address resolution before we send any real packets to it.
+
+This method creates and closes its own socket so it does not interfere with
+other threads.
+
+It is called at initialisation if you pass 'wakeup' into the constructor.
+
+=cut
+
+sub wakeup {
+	my $self = shift;
+	my %arg = @_;
+
+	$self->_dbg("Attempting to wakeup module at ".$self->{'target_addr'}.":".$self->{'target_port'}, 1);
+
+	my $s = IO::Socket::INET->new(
+			PeerAddr =>	$self->{'target_addr'},
+			PeerPort =>	$self->{'target_port'},
+			Proto =>	'udp',
+			ReuseAddr =>	1,
+	);
+	if(!$s) {
+		$_error = "Net::Elexol::EtherIO24->wakeup can't create socket for wakeup: $@\n";
+		return undef;
+	}
+
+	# Send a couple of simple packets to the device.
+	$s->send('IO24');
+	$s->send('IO24');
+	$s->send('IO24');
+
+	# Wait briefly - enough time for MAC resolution to occur.
+	Time::HiRes::usleep(250000);
+
+	# TODO: Detect if the module was woken up or not. :)
+
+	# Move on.
+	$s->close;
+
+	return 1;
 }
 
 sub _service_indirect {
@@ -423,8 +486,8 @@ sub _service_status {
 
 	while($self->{'data'}->{'running'}) {
 		if($self->{'service_status_fetch'} && $status_time < Time::HiRes::time()) {
-			# 0=don't recv_result, which would cause a deadlock
 			$status_time = Time::HiRes::time() + $self->{'service_status_fetch'};
+			# 0=don't recv_result, which would cause a deadlock
 			$self->status_fetch(0);
 		} else {
 			Time::HiRes::usleep(1000000);
