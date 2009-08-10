@@ -10,3 +10,5 @@ YMMV.
 
 'write_fixed_address.pl' is a standalone script to program the fixed address in the EEPROM of the EIO24.
 
+'linestatus' is a simple utility to look and set line status and direction of an EIO24.
+

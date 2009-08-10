@@ -26,15 +26,15 @@ use Time::HiRes;
 
 =head1 NAME
 
-Net::Elexol::EtherIO24 - Object interface for manipulating Elexol Ether I/O 24 units with Perl
+Net::Elexol::EtherIO24 - Threaded object interface for manipulating Elexol Ether I/O 24 units with Perl
 
 =cut
 
-our $VERSION = '0.18';
+our $VERSION = '0.20';
 
 =head1 VERSION
 
-Version 0.18.
+Version 0.20.
 
 Requires Perl 5.8.0.
 
@@ -59,8 +59,8 @@ Requires Perl 5.8.0.
 =head1 DESCRIPTION
 
 The Ether I/O 24 manufactured by Elexol is an inexpensive and simple to
-use/operate device designed for remote control or remote sensing.
-It has 24 lines that are each programmable for input or output and a
+use and operate device designed for remote control or remote sensing.
+It has 24 digital lines that are each programmable for input or output and a
 variety of other things.
 
 The control protocol is relatively simplistic and UDP based. This Perl
@@ -75,7 +75,7 @@ a result. In particular, the module functions in a nice asynchronous
 way when it can use threads. Threads support requires Perl 5.8.
 This module may not function correctly, or even compile, with an older Perl.
 Your Perl will require Threads to be enabled at compile-time, even if you
-don't use Threads.
+don't use Threads with this module.
 
 It uses C<IO::Socket::INET> for network I/O and C<Time::HiRes> for timing.
 It was developed using Perl on a FreeBSD and a Linux system, but has
@@ -222,13 +222,45 @@ that produced the debugging output is included after the prefix.
 Defaults to '1', on. Determines whether the I<indirect_write_send> method is
 called at I<close> to flush any pending writes.
 
+=item I<eeprom_read_retries>
+
+Number of attempts to read an eeprom location, if it times out. Defaults to '2'.
+
+=item I<async_status_sub>
+
+By default this is not defined. The developer can pass in a reference to a
+subroutine that will be called after new status information is received from
+the Elexol device.
+
+Such new status includes both the response to a status query, or unsolicited
+updates from the autoscan feature.
+
+The subroutine is passed four parameters:
+
+	$fn($data, $key, $new_value, $old_value)
+
+I<$data> is the $data hash used to store information by the object, and which
+can optionally be passed in at object creation time (see below).
+
+I<$key> is the index into $data that was updated with new status information.
+This will be in the form "TYPE GROUP" where TYPE is one of "status", "dir",
+"pullup", "thresh" and GROUP is one of "A", "B", or "C".
+
+I<$new_value> is the value just received.
+
+I<$old_value> is the previous value.
+
 =item I<data>
 
 Various state information is contained within a hash. If not given, one
 is created and used anonymously. However, the application can pass in
-a reference to a hash here, for whatever reason. Idle curiosity perhaps?
+a reference to a hash here, for instance to identify this object to an
+async callback subroutine.
 
 Many of the items in this hash are C<threads::shared> when we are threading.
+
+Developers should prefix their own elements in this hash with a '_'
+character to ensure uniqueness from those added by this module.
 
 =back
 
@@ -276,13 +308,16 @@ sub new {
 	$self->{'indirect_read_interval'} = 0.5;
 	$self->{'read_before_write'} = 0;
 	$self->{'flush_writes_at_close'} = 1;
+	$self->{'eeprom_read_retries'} = 2;
+	$self->{'async_status_sub'} = undef;
 
 	foreach my $field (('debug', 'debug_prefix',
 			'prefetch_status', 'presend_status', 'threaded', 'recv_timeout',
 			'service_recv_timeout', 'service_status_fetch',
 			'direct_writes', 'direct_reads',
 			'indirect_write_interval', 'indirect_read_interval',
-			'read_before_write', 'flush_writes_at_close', )) {
+			'read_before_write', 'flush_writes_at_close', 'eeprom_read_retries',
+			'async_status_sub', )) {
 		$self->{$field} = $arg{$field} if(defined($arg{$field}));
 	}
 
@@ -473,7 +508,7 @@ sub dump_packet {
 		my $l = substr($packet, $offset, $incr);
 		my $hexstr = join(' ', map { sprintf "%02.2x", $_ } unpack("C*", $l));
 		my $ascstr = $l;
-		$ascstr =~ s/\W/./g;
+		$ascstr =~ s/[^A-Za-z0-9,:;\-=_+<>?\/\\{}[\]'"`]/./g;
  
 		my $hexlen = ($incr*3)-1;
 		$string .= sprintf("%04.4d  %-${hexlen}.${hexlen}s  %s\n", $offset, $hexstr, $ascstr);
@@ -748,13 +783,13 @@ my $send_commands = {
 	'\'0' => {
 		'length' => 5,
 		'desc' => 'Write disable EEPROM',
-		'type' => 'eeprom',
+		'type' => 'hex_byte',
 		'nobundle' => 1,
 		},
 	'\'1' => {
 		'length' => 5,
 		'desc' => 'Write enable EEPROM',
-		'type' => 'eeprom',
+		'type' => 'hex_byte',
 		'nobundle' => 1,
 		},
 	'\'@' => {
@@ -962,16 +997,9 @@ sub eeprom_fetch {
 	my $last = 24;
 	$last = 63 if($fetchall);
 
-	foreach my $addr (0..24) {
-		my $cmd = "'R".pack("CCC", $addr, 0, 0);
-		if(!send_command($self, $cmd)) {
-			$self->_dbg("WARNING: Unable to send eeprom request.", 0);
+	foreach my $addr (0..$last) {
+		if(!$self->read_eeprom($addr)) {
 			return 0;
-		} else {
-			if($recv && !recv_result($self, $cmd)) {
-				$self->_dbg("WARNING: Timeout waiting for eeprom reply.", 0);
-				return 0;
-			}
 		}
 	}
 	$self->{'data'}->{'last_eeprom_fetch'} = time();
@@ -1005,7 +1033,7 @@ sub status_fetch {
 		$cmd .= $status_commands->{$key};
 	}
 	if(!send_command($self, $cmd)) {
-		_dbg("WARNING: Unable to send status request.", 0);
+		$self->_dbg("WARNING: Unable to send status request.", 0);
 		return 0;
 	} else {
 		if($recv && !recv_result($self, $cmd)) {
@@ -1034,7 +1062,7 @@ sub status_send {
 		$cmd .= $set_commands->{$key}.pack("C", $self->{$key});
 	}
 	if(!send_command($self, $cmd)) {
-		$self->_dbg("WARNING: Unable to send status.\n", 0);
+		$self->_dbg("WARNING: Unable to send status.", 0);
 		return 0;
 	}
 	$self->{'data'}->{'last_status_send'} = time();
@@ -1085,11 +1113,11 @@ sub _decode_cmd {
 		}
 	} elsif($type eq 'eeprom') {
 		my($addr, $msb, $lsb) = unpack("x2 CCC", $cmd);
-		$txt = sprintf("addr: %d (%02.2x) val: %02.2x %02.2x",
+		$txt = sprintf("addr: %d (0x%02.2x) val: %02.2x %02.2x",
 			$addr, $addr, $msb, $lsb);
 	} elsif($type eq 'eeprom_recv') {
 		my($addr, $msb, $lsb) = unpack("x CCC", $cmd);
-		$txt = sprintf("addr: %d (%02.2x) val: %02.2x %02.2x",
+		$txt = sprintf("addr: %d (0x%02.2x) val: %02.2x %02.2x",
 			$addr, $addr, $msb, $lsb);
 	} elsif($type eq 'host_data') {
 		$txt .= sprintf("Serial: %02.2x%02.2x%02.2x ".
@@ -1123,7 +1151,7 @@ sub _find_cmd {
 Not normally called directly.
 
 Verify commands to be sent. Returns 1 if the command(s) is(are) valid. Returns
-0 if any command is invalud. Will search the entire string given for multiple commands.
+0 if any command is invalid. Will search the entire string given for multiple commands.
 
 Will perform various processing tasks on the command, such as resetting the
 "status received" flags for any status fields referenced by the command.
@@ -1247,9 +1275,16 @@ sub verify_recv_command {
 			} else {
 				$data->{'ts '.$k} = Time::HiRes::time();
 			}
+			$data->{'prev '.$k} = $data->{$k};
 			$data->{$k} = unpack("x$len C", $cmd);
 			$self->_dbg("verify_recv_command: set_map \"$c\" ($k) = ".
 				sprintf("%02.2x", $data->{$k}), 2);
+			my $fn = $self->{'async_status_sub'};
+			if(defined($fn) && ref($fn) eq 'CODE') {
+				# call the handler
+				$self->_dbg("verify_recv_command: calling async handler", 2);
+				&$fn($data, $k, $data->{$k}, $data->{'prev '.$k});
+			}
 		} elsif($c eq 'R') { # save eeprom data
 			# eepromness
 			my($addr, $msb, $lsb) = unpack("x$len CCC", $chk);
@@ -1387,7 +1422,92 @@ sub recv_result {
 	# Go-do in realtime
 	return recv_command($self);
 }
-	
+
+# =============================================================================
+
+=item I<read_eeprom($index, [$index, ...])>
+
+Reads the given eeprom locations. Always waits for the answer.
+
+Returns the count of locations sucessfuly read or 0 on error.
+
+=cut
+
+sub read_eeprom {
+	my $self = shift;
+
+	my $count = 0;
+	while(@_) {
+		my $addr = shift;
+		my $cmd = "'R".pack("CCC", $addr, 0, 0);
+		my $retries = $self->{'eeprom_read_retries'};
+		while($retries) {
+			if(!send_command($self, $cmd)) {
+				$self->_dbg("WARNING: Unable to send eeprom read request for location $addr.", 0);
+				next;
+			} else {
+				if(!recv_result($self, $cmd)) {
+					$retries--;
+					if(!$retries) {
+						$self->_dbg("ERROR: Timeout waiting for eeprom reply for location $addr.", 0);
+					} else {
+						$self->_dbg("WARNING: Timeout waiting for eeprom reply for location $addr. Retrying.", 1);
+					}
+					next;
+				} else {
+					$count++;
+					last;
+				}
+			}
+		}
+	}
+	return $count;
+}
+
+=item I<write_eeprom($index, [$index, ...])>
+
+Write the contents of our local eeprom cache for the given index(es) to the
+Elexol device.
+
+It includes a 100ms delay after each write in order to let the eeprom settle.
+
+=cut
+
+sub write_eeprom {
+	my $self = shift;
+	my $data = $self->{'data'};
+
+	while(@_) {
+		my $index = shift;
+
+		my $lsb = $data->{'eeprom '.$index} & 0xff;
+		my $msb = ($data->{'eeprom '.$index} >> 8) & 0xff;
+
+		$self->send_command("'W".pack('C*', $index, $msb, $lsb));
+
+		Time::HiRes::usleep(100000); # let it settle
+	}
+}
+
+=item I<eeprom_write_enable($enable)>
+
+Enables or disables the "write" flag for the eeprom on the Elexol device.
+
+=cut
+
+sub eeprom_write_enable {
+	my $self = shift;
+	my $enable = shift;
+
+	if($enable) {
+		$self->_dbg("Sending eeprom write enable...", 2);
+		return $self->send_command("'1" . pack("C*", 0x00, 0xaa, 0x55));  # write enable
+	} else {
+		$self->_dbg("Sending eeprom write disable...", 2);
+		return $self->send_command("'0" . pack("C*", 0x00, 0x00, 0x00));  # write disable
+	}
+}
+
 # =============================================================================
 
 =item I<send_pkt>
@@ -1474,7 +1594,9 @@ Restarts the module. Needed to make any eeprom changes take affect.
 sub reboot {
 	my $self = shift;
 
-	return send_command($self, "'@".pack('C*', 0, 0xaa, 0x55));
+	$self->indirect_write_send;
+
+	return $self->send_command("'@".pack('C*', 0x00, 0xaa, 0x55));
 }
 
 sub _chkts {
@@ -1871,13 +1993,17 @@ $addr is an ASCII string representation of an IP address.
 $port is a numeric UDP port number.
 
 If not specified, it will attempt to determine the current
-IP address and port of the open UDP socket. This may not always
-be successful!
+IP address and port of the open UDP socket. This may not be
+wholly portable and your mileage may vary. Unix-like platforms
+should fare best.
 
 If $addr is a numeric 0 then the autoscan function will be disabled
 on the module.
 
 Changes made by this function require a module restart to take effect.
+
+Before making changes to the eeprom, this method always reads in the
+current value first.
 
 =cut
 
@@ -1886,19 +2012,68 @@ sub set_autoscan_addr {
 	my $addr = shift;
 	my $port = shift;
 
+	# Bit 2 of eeprom word 5 controls autoscan enable
+	# Words 22,23 are the autoscan ip addr
+	# Word 24 is the autoscan udp port
+
 	my $data = $self->{'data'};
 
-	if(!$self->{'prefetch_status'}) {
-		eeprom_fetch($self, 1);  # 1=wait for response
-	}
+	if(defined($addr) && $addr eq '0') {
+		$self->read_eeprom(5); # refresh, just in case
+		$data->{'eeprom 5'} |= 4; # add bit 4 to disable autoscan
+		$self->write_eeprom(5);
 
-	$data->{'eeprom 5'} &= ~5; # subtract bit 4 to enable autoscan
-	send_command($self, "'W".pack('C*', 5, ($data->{'eeprom 5'} >> 8) & 0xff, $data->{'eeprom 5'} & 0xff));
+		Time::HiRes::usleep(500000); # let the eeprom settle
+
+		$self->read_eeprom(5); # refresh, one more time
+
+	} else {
+
+		my $sockaddr = $self->{'socket'}->sockname;
+		my @s = sockaddr_in($sockaddr);
+		if(!$addr) {
+			$addr = inet_ntoa($s[1]);
+		}
+		if(!$port) {
+			$port = $s[0];
+		}
+
+		$self->_dbg("set_autoscan_addr: set addr to $addr:$port", 1);
+
+
+		$self->eeprom_write_enable(1);
+
+		my @a = split(/\./, $addr, 4);
+
+		$data->{'eeprom 22'} = ($a[1] << 8) | $a[0];
+		$data->{'eeprom 23'} = ($a[3] << 8) | $a[2];
+		$data->{'eeprom 24'} = $port;
+
+		my ($w22, $w23, $w24) = ($data->{'eeprom 22'}, $data->{'eeprom 23'}, $data->{'eeprom 24'}); # keep a copy
+
+		$data->{'eeprom 18'} = 4; # 125 scans per second (1000 / 4)
+
+		$self->write_eeprom(18, 22, 23, 24); # write these values out
+
+		$self->read_eeprom(22, 23, 24); # read it back in
+
+		# TODO: verify the written values made it in.
+
+		$self->read_eeprom(5); # refresh, just in case
+		$data->{'eeprom 5'} &= ~4; # subtract bit 4 to enable autoscan
+		$self->write_eeprom(5);
+
+		$self->read_eeprom(5); # refresh, one more time
+
+		# TODO: verify the flag was set
+
+		$self->eeprom_write_enable(0);
+	}
 }
 
-=item I<set_autoscan_line($line, $state)>
+=item I<set_autoscan_lines($line => $state, ...)>
 
-Sets the autoscan state of line $line.
+Sets the autoscan state of the given lines to the given state.
 
 Where $state = 1, the module will send status changes for $line.
 
@@ -1906,10 +2081,37 @@ Changes made by this function require a module restart to take effect.
 
 =cut
 
-sub set_autoscan_line {
+sub set_autoscan_lines {
 	my $self = shift;
-	my $line = shift;
-	my $state = shift || 1;
+
+	return 0 if(!@_);
+
+	my %args = @_;
+
+	my $data = $self->{'data'};
+
+	$self->read_eeprom(16, 17); # get a fresh copy
+	foreach my $line (keys %args) {
+		my $state = $args{$line};
+
+		my $bit = $line % 16;
+		my $mask = 1 << $bit;
+
+		my $addr;
+		$addr = 16 if($line >= 0  && $line <= 15);
+		$addr = 17 if($line >= 16 && $line <= 23);
+
+		my $val = $data->{'eeprom '.$addr};
+		if($state) {
+			$val &= ~$mask;
+		} else {
+			$val |= $mask;
+		}
+		$data->{'eeprom '.$addr} = $val;
+	}
+	$self->write_eeprom(16, 17); # save new version
+
+	return 1;
 }
 
 =item I<set_startup_status($state)>
@@ -1947,27 +2149,29 @@ sub set_startup_status {
 		15	=> [ 0,           'schmitt C' ],
 	};
 
-	send_command($self, "'1".pack('CCC', 0, 0xaa, 0x55)); # write enable
+
+	$self->read_eeprom(5); # ensure a fresh copy
 
 	if($state) {
-		$data->{'eeprom 5'} &= ~2; # subtract bit 2 to enable port preset
-		send_command($self, "'W".pack('CCC', 5, ($data->{'eeprom 5'} >> 8) & 0xff, $data->{'eeprom 5'} & 0xff));
+		$data->{'eeprom 5'} &= ~2; # subtract bit 1 (value 2) to enable port preset
 
 		foreach my $field (sort { $a <=> $b } keys %$fields) {
 			my $arr = $fields->{$field};
 			$data->{'eeprom '.$field} = ((@$arr[0]?$data->{@$arr[0]}:0) * 256) + (@$arr[1]?$data->{@$arr[1]}:0);
-			send_command($self, "'W" . pack('CCC', $field, ($data->{'eeprom '.$field} >> 8) & 0xff, $data->{'eeprom '.$field} & 0xff));
 		}
 	} else {
-		$data->{'eeprom 5'} |= 2; # add bit 2 to enable port preset
-		send_command($self, "'W".pack('C*', 5, ($data->{'eeprom 5'} >> 8) & 0xff, $data->{'eeprom 5'} & 0xff));
+		$data->{'eeprom 5'} |= 2; # add bit 1 (value 2) to enable port preset
 
 		foreach my $field (sort { $a <=> $b } keys %$fields) {
-			send_command($self, "'W" . pack('CCC', $field, 0xff, 0xff));
+			$data->{'eeprom '.$field} = 0xffff;
 		}
 	}
 
-	send_command($self, "'0".pack('CCC', 0, 0xaa, 0x55)); # write disable
+	$self->eeprom_write_enable(1);
+	$self->write_eeprom(5, sort keys %$fields);
+	$self->eeprom_write_enable(0);
+
+	return 1;
 }
 
 =back

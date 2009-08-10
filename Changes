@@ -38,3 +38,13 @@ Revision history for Net-Elexol-EtherIO24
 0.18	2008-02-01 [chrisy]
 	- Fix stupid MANIFEST mistake.
 
+0.19	2008-02-05 [chrisy]
+	- Work on the implementation of set_autoscan_addr
+	- Add some eeprom-related methods (read_eeprom, write_eeprom,
+	  eeprom_write_enable)
+	- eeprom_read "retries" if a read attempt timesout.
+	- Tweak dump_packet slightly
+
+0.20	2009-08-03 [chrisy]
+	- Add linestatus example utility
+	- Fix debugging errors that break operation
