@@ -50,5 +50,9 @@ Revision history for Net-Elexol-EtherIO24
 	- Fix debugging errors that break operation
 
 0.21	2009-08-10 [chrisy]
-	- Fix reasonably serious thread-seperation issue
+	- Fix reasonably serious thread-separation issue
+
+0.22	2009-08-11 [chrisy]
+	- Fix deadlock introduced in close upon DESTROY, which may also fix other
+	  issues caused by calling close in DESTROY when not the parent thread
 

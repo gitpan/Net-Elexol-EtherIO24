@@ -30,11 +30,11 @@ Net::Elexol::EtherIO24 - Threaded object interface for manipulating Elexol Ether
 
 =cut
 
-our $VERSION = '0.21';
+our $VERSION = '0.22';
 
 =head1 VERSION
 
-Version 0.21.
+Version 0.22.
 
 Requires Perl 5.8.0.
 
@@ -309,6 +309,11 @@ sub new {
 	$self->{'eeprom_read_retries'} = 2;
 	$self->{'async_status_sub'} = undef;
 
+	$self->{'socket'} = undef;
+	$self->{'thread_indirect'} = undef;
+	$self->{'thread_status'} = undef;
+	$self->{'thread_recv'} = undef;
+
 	foreach my $field (('debug', 'debug_prefix',
 			'target_addr', 'target_port',
 			'prefetch_status', 'presend_status', 'threaded', 'recv_timeout',
@@ -364,14 +369,21 @@ sub new {
 		}
 	}
 	$self->status_send() if($self->{'presend_status'});
+	$self->{'parent'} = 1;
 
 	return $self;
 }
 
-DESTROY {
-	my $self = shift;
-	$self->close(1);
-}
+# Until we can reliably detect the one and only useful call to this, 
+# we need to comment out DESTROY. It's called too many times when a
+# thread ends and runtime values like 'running' don't seem to keep up!
+# Net effect: Applications MUST call 'close'.
+
+#DESTROY {
+#	my $self = shift;
+#	$self->close if($self->{'parent'});
+#	$self->SUPER::DESTROY if($self->can("SUPER::DESTROY"));
+#}
 
 =head1 METHODS
 
@@ -389,21 +401,24 @@ might not be patient enough to wait for threads to end by that time.
 
 sub close {
 	my $self = shift;
-	my $quick = shift || 0;
 
+	return if(!$self->{'parent'});
 	return if(!$self->{'data'}->{'running'});
 
-	$self->indirect_write_send if(!$quick && $self->{'flush_writes_at_close'});;  # flush anything pending
+	$self->_dbg("close called, shutting down...", 1);
 
-	$self->{'data'}->{'running'} = 0; # should signal threads to exit
+	$self->indirect_write_send if($self->{'flush_writes_at_close'});  # flush anything pending
+
+	{ lock($self->{'data'}->{'running'}); $self->{'data'}->{'running'} = 0; } # should signal threads to exit
 
 	if($self->{'threaded'}) {
 		foreach my $tname (('indirect', 'status', 'recv')) {
-			$self->_dbg("waiting for service '$tname' thread to die", 1);
 			my $t = $self->{'thread_'.$tname};
-			#$t->join if($t);
-			$t->detach if($t);
-			$self->{'thread_'.$tname} = undef;
+			if($t) {
+				$self->_dbg("waiting for thread '$tname' (id ".$t->tid().") to stop", 1);
+				$t->join;
+				$self->{'thread_'.$tname} = undef;
+			}
 		}
 	}
 
@@ -443,6 +458,7 @@ sub wakeup {
 	}
 
 	# Send a couple of simple packets to the device.
+	$s->send('IO24');
 	$s->send('IO24');
 	$s->send('IO24');
 	$s->send('IO24');
@@ -994,6 +1010,7 @@ sub _init_state {
 
 	$data->{'running'} = 1;
 	share($data->{'running'});
+	$data->{'running'} = 1;
 
 	foreach my $key (keys %$status_commands) {
 		$data->{$key} = 0;
@@ -1137,7 +1154,7 @@ sub status_send {
 This method performs various background tasks such as sending any updates to
 the Elexol device that are pending and retrieving status from the device.
 
-It should be called periodically (often) if you aren not using threads; otherwise
+It should be called periodically (often) if you are not using threads; otherwise
 it is not necessary (but not harmful) to call this.
 
 =cut
